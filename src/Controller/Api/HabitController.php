@@ -10,11 +10,18 @@ use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
+use App\Service\HabitStatsService;
+use App\Service\MongoStatsService;
 
 final class HabitController extends AbstractController
 {
     #[Route('/api/habits', name: 'api_habits_list', methods: ['GET'])]
-    public function list(Request $request, UserRepository $userRepository, HabitRepository $habitRepository): JsonResponse
+    public function list(
+        Request $request, 
+        UserRepository $userRepository, 
+        HabitRepository $habitRepository,
+        MongoStatsService $mongoStatsService
+    ): JsonResponse
     {
         $token = $request->headers->get('X-AUTH-TOKEN');
 
@@ -28,14 +35,22 @@ final class HabitController extends AbstractController
             return $this->json(['message' => 'Token invalide'], 401);
         }
 
+        $date = $request->query->get('date') ?? (new \DateTime())->format('Y-m-d');
+
         $habits = $habitRepository->findBy(['owner' => $user]);
 
-        $data = array_map(function (Habit $habit) {
+        $completedHabits = $mongoStatsService->getCompletedHabitsForDate(
+            $user->getId(),
+            $date
+        );
+
+        $data = array_map(function (Habit $habit) use ($completedHabits) {
+
             return [
                 'id' => $habit->getId(),
                 'title' => $habit->getTitle(),
-                'done' => $habit->isDone(),
                 'days' => $habit->getDays(),
+                'done' => in_array($habit->getId(), $completedHabits),
             ];
         }, $habits);
 
@@ -98,7 +113,8 @@ final class HabitController extends AbstractController
         Request $request,
         UserRepository $userRepository,
         HabitRepository $habitRepository,
-        EntityManagerInterface $entityManager
+        EntityManagerInterface $entityManager,
+        MongoStatsService $mongoStatsService
     ): JsonResponse {
         $token = $request->headers->get('X-AUTH-TOKEN');
 
@@ -122,7 +138,24 @@ final class HabitController extends AbstractController
             return $this->json(['message' => 'Accès interdit'], 403);
         }
 
-        $habit->setDone(!$habit->isDone());
+        $date = $request->query->get('date') ?? (new \DateTime())->format('Y-m-d');
+
+        $isCompleted = $mongoStatsService->isHabitCompletedForDate(
+            $user->getId(),
+            $habit->getId(),
+            $date
+        );
+
+        $newCompletedStatus = !$isCompleted;
+
+        $mongoStatsService->saveHabitStat([
+            'userId' => $user->getId(),
+            'habitId' => $habit->getId(),
+            'habit' => $habit->getTitle(),
+            'completed' => $newCompletedStatus,
+            'date' => $date,
+        ]);
+
         $entityManager->flush();
 
         return $this->json([
@@ -130,7 +163,7 @@ final class HabitController extends AbstractController
             'habit' => [
                 'id' => $habit->getId(),
                 'title' => $habit->getTitle(),
-                'done' => $habit->isDone(),
+                'done' => $newCompletedStatus,
                 'days' => $habit->getDays(),
             ]
         ], 200);
